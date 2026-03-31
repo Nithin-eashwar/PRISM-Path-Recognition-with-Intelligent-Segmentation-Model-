@@ -1,251 +1,198 @@
-# 🔮 PRISM — Path Recognition with Intelligent Segmentation Model
+# PRISM - Path Recognition with Intelligent Segmentation Model
 
-**Real-time drivable space segmentation for Level 4 autonomous vehicles, built entirely from scratch on nuScenes v1.0-mini.**
+Real-time drivable-space segmentation on nuScenes `v1.0-mini`, built from scratch in PyTorch.
 
-![Architecture](https://img.shields.io/badge/Architecture-MobileNetV2+ASPP+UNet-blue)
-![Params](https://img.shields.io/badge/Parameters-1.86M-green)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+## Project Overview
 
----
+PRISM performs binary segmentation on front-camera driving images:
+- `1` = drivable
+- `0` = non-drivable
 
-## 🧠 What is PRISM?
+Key capabilities included in this repo:
+- A lightweight student model (`LiteSegNet`) for deployment
+- A larger teacher model (`LiteSegTeacher`) for knowledge distillation
+- Custom PRISM loss (`PRISMLossV2`) to suppress false positives (sky/buildings -> road)
+- Boundary refinement and test-time augmentation (TTA) for sharper masks
+- Inference utilities: ONNX export, FPS benchmarking, demo video generation
+- Optional vehicle suppression using YOLOv8n during inference
 
-PRISM is a lightweight binary segmentation network that classifies every pixel in a driving camera image as **drivable** or **non-drivable**. It's a critical perception component for autonomous vehicles — the car needs to know *where it can safely drive* in real-time.
+## Model Architecture
 
-**Built 100% from scratch** — zero pre-trained weights, every convolution layer manually implemented.
+### Core Pipeline (student and teacher share the same design)
 
----
+Input (`3 x 256 x 448`) ->
+1. **CoordConv stem** for explicit (x, y) spatial priors
+2. **MobileNetV2-style encoder** with inverted residual blocks
+3. **RAU (Reflection Attention Unit)** to handle reflective road/puddle regions
+4. **Lightweight ASPP** (dilations 6/12/18 + global pooling)
+5. **U-Net decoder** with skip connections + SE attention
+6. **Segmentation head** -> raw logits (sigmoid applied externally)
+7. **Auxiliary boundary head** (training-only) for edge supervision
 
-## 🏗️ Architecture
+### Student vs Teacher (from repo metrics)
 
-```
-Input (3×256×448)
-    │
-    ▼
-┌──────────────────────────────────┐
-│   MobileNetV2 Encoder            │
-│   (Inverted Residual Blocks)     │
-│   Depthwise Separable Convs      │
-│   ──skip@1/4── ──skip@1/8──     │
-│   Output: 160ch @ 1/16 res      │
-└──────────────┬───────────────────┘
-               │
-    ▼
-┌──────────────────────────────────┐
-│   ASPP Decoder                   │
-│   Dilations: 6, 12, 18          │
-│   + Global Average Pooling       │
-│   Multi-scale context capture    │
-│   Output: 128ch @ 1/16 res      │
-└──────────────┬───────────────────┘
-               │
-    ▼
-┌──────────────────────────────────┐
-│   U-Net Decoder                  │
-│   1/16 → 1/8 (+ skip_8x)       │
-│   1/8  → 1/4 (+ skip_4x)       │
-│   1/4  → Full (bilinear up)     │
-└──────────────┬───────────────────┘
-               │
-    ▼
-┌──────────────────────────────────┐
-│   Segmentation Head              │
-│   Conv3×3 → Conv1×1 → Sigmoid   │
-│   Output: 1×256×448 (binary)    │
-└──────────────────────────────────┘
-```
+| Model | Parameters | Purpose |
+|---|---:|---|
+| LiteSegNet (student) | ~1.86M | Fast inference / deployment |
+| LiteSegTeacher | ~1.97M | Teacher for distillation |
 
-**Model Specs:**
+## Dataset Used
 
-| Metric | Student | Teacher |
-|---|---|---|
-| Parameters | **1.86M** ✓ | 4.56M |
-| Input Resolution | 256 × 448 | 256 × 448 |
-| Output | Binary mask | Binary mask |
-| FPS Target | >30 CPU / >100 GPU | — |
+### Source
 
----
+- **nuScenes `v1.0-mini`**
+- 10 scenes, 404 CAM_FRONT keyframes
+- Original resolution: `1600 x 900`
+- Training/inference resolution: `448 x 256`
 
-## 📁 Project Structure
+### Required Layout (under `--dataroot`)
 
 ```
-PRISM/
-├── model.py              # LiteSeg architecture (encoder + ASPP + decoder)
-├── dataset.py            # PyTorch Dataset with albumentations augmentations
-├── train.py              # Training pipeline (AdamW + CosineAnnealingLR)
-├── evaluate.py           # Evaluation: mIoU, confusion matrix, visualizations
-├── inference.py          # Inference + ONNX export + quantization + demo video
-├── utils.py              # Loss functions, metrics, post-processing, TTA
-├── generate_masks.py     # Drivable area mask generation from nuScenes
-├── requirements.txt      # Python dependencies
-└── README.md             # This file
+v1.0-mini/
+  scene.json
+  sample.json
+  sample_data.json
+  calibrated_sensor.json
+  ego_pose.json
+  sensor.json
+  map.json
+samples/
+  CAM_FRONT/   # front camera images (.jpg)
+maps/          # nuScenes bitmap semantic priors (referenced by map.json)
 ```
 
----
+### Labels / Masks
 
-## 🚀 Quick Start
+Drivable masks are generated from nuScenes semantic-prior bitmaps:
+- `generate_masks.py` auto-calibrates bitmap-to-world alignment using ego poses
+- Masks are projected into camera space and saved as PNGs in `masks/`
+- `masks/file_mapping.json` stores `(image_rel_path, mask_filename)` pairs
 
-### 1. Clone & Install
+Train/val split is **scene-based** to prevent leakage (default = last 2 scenes for validation).
 
-```bash
-git clone https://github.com/Lokaksha25/PRISM-Path-Recognition-with-Intelligent-Segmentation-Model-.git
-cd PRISM-Path-Recognition-with-Intelligent-Segmentation-Model-
+## Setup & Installation Instructions
+
+Run from repository root:
+
+```powershell
+cd "path\to\PRISM-Path-Recognition-with-Intelligent-Segmentation-Model-"
+python -m venv venv
+.\venv\Scripts\activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 2. Dataset Setup
+Optional dependency (only if you use `--suppress_vehicles` in inference):
 
-Download the **nuScenes v1.0-mini** dataset from Google Drive and extract it into the project root:
-
-📁 **[Download Dataset from Google Drive](https://drive.google.com/drive/folders/1g5KgxG0p8-MmTiXkNtCpoYSIkdBQprEm)**
-
-After downloading, extract:
-```bash
-tar -xzf v1.0-mini.tgz
+```powershell
+pip install ultralytics
 ```
 
-### 3. Generate Drivable Masks
+## How to Run the Code
+
+### 1) Generate Masks
 
 ```bash
-python generate_masks.py --dataroot ./ --output_dir masks --visualize 5
+python generate_masks.py --dataroot ./ --output_dir masks --visualize 10
 ```
 
-### 4. Train
+### 2) Training (recommended distillation-first sequence)
 
-**Student model (1.86M params):**
+1. Train teacher
 ```bash
-python train.py --dataroot ./ --mask_dir masks --epochs 50 --batch_size 16 --lr 1e-3
+python train.py --dataroot ./ --mask_dir masks --epochs 50 --batch_size 16 --lr 1e-3 --train_teacher --save_name teacher_best.pth
 ```
 
-**Teacher model (4.56M params) for knowledge distillation:**
+2. Distill student from teacher
 ```bash
-python train.py --epochs 50 --batch_size 16 --train_teacher --save_name teacher_best.pth
+python train.py --dataroot ./ --mask_dir masks --epochs 50 --batch_size 16 --lr 1e-3 --distill --teacher_weights output/teacher_best.pth --save_name best_model_distilled.pth
 ```
 
-**Knowledge distillation (teacher → student):**
+3. Optional baseline student (no distillation)
 ```bash
-python train.py --epochs 50 --distill --teacher_weights output/teacher_best.pth
+python train.py --dataroot ./ --mask_dir masks --epochs 50 --batch_size 16 --lr 1e-3 --save_name best_model_baseline.pth
 ```
 
-### 5. Evaluate
+Notes:
+- Default loss is `PRISMLossV2` (focal + tversky + multi-scale boundary + spatial prior).
+- Use `--loss combo` or `--loss boundary` for legacy alternatives.
+- `--grad_accum` lets you emulate larger batches on smaller GPUs.
+
+### 3) Evaluate
 
 ```bash
-python evaluate.py --weights output/best_model.pth --use_tta --use_boundary_refinement
+python evaluate.py --weights output/best_model_distilled.pth --dataroot ./ --mask_dir masks --use_tta --use_boundary_refinement
 ```
 
-### 6. Inference
+This produces:
+- `eval_output/metrics.json`
+- `eval_output/confusion_matrix.png`
+- `eval_output/visualizations/` (overlay samples)
 
-**Single image:**
+### 4) Inference
+
+Single image:
 ```bash
-python inference.py --image path/to/image.jpg --weights output/best_model.pth --refine --tta
+python inference.py --image path/to/image.jpg --weights output/best_model_distilled.pth --refine --tta
 ```
 
-**ONNX export + benchmark:**
+Optional vehicle suppression (YOLOv8n):
 ```bash
-python inference.py --export_onnx --benchmark --quantize --weights output/best_model.pth
+python inference.py --image path/to/image.jpg --weights output/best_model_distilled.pth --refine --tta --suppress_vehicles
 ```
 
-**Demo video:**
+ONNX export + benchmark:
 ```bash
-python inference.py --demo_video --weights output/best_model.pth --dataroot ./
+python inference.py --weights output/best_model_distilled.pth --export_onnx --benchmark --quantize
 ```
 
----
+Demo video (from scene sequence):
+```bash
+python inference.py --weights output/best_model_distilled.pth --demo_video --dataroot ./
+```
 
-## 📊 Training Recipe
-
-| Hyperparameter | Value |
-|---|---|
-| **Optimizer** | AdamW |
-| **Learning Rate** | 1e-3 |
-| **Weight Decay** | 1e-4 |
-| **LR Schedule** | CosineAnnealingLR |
-| **Loss Function** | ComboLoss (0.5×BCE + 0.5×Dice) |
-| **Batch Size** | 16 (GPU) / 4 (CPU) |
-| **Epochs** | 50+ |
-| **Input Size** | 256 × 448 |
-
-### Augmentations
-- Random horizontal flip
-- Random brightness/contrast
-- Random gamma correction (night simulation)
-- Coarse dropout (occlusion simulation)
-- Hue/saturation/value jitter
-- Gaussian blur / motion blur
-- Gaussian noise
-- Normalize with dataset-computed mean/std
-
----
-
-## 🎯 Edge Cases Handled
-
-| Edge Case | Solution |
-|---|---|
-| Road-to-grass transitions | Boundary-aware loss weighting |
-| Water puddles / reflective surfaces | Brightness/tone curve augmentation |
-| Construction zones | Training on urban construction scene data |
-| Night scenes | Gamma augmentation + 3 night scenes in dataset |
-| Partial occlusion | Coarse dropout augmentation |
-
----
-
-## 🏆 Key Differentiators
-
-1. **100% From Scratch** — No pre-trained weights, no `torchvision.models` imports
-2. **Boundary Refinement** — Morphological open/close post-processing
-3. **Test-Time Augmentation** — Horizontal flip averaging for free mIoU boost
-4. **Knowledge Distillation** — 5M teacher → 2M student training
-5. **ONNX + Quantization** — Dynamic int8 quantization for edge deployment
-6. **Demo Video** — Scene sequence overlay visualization
-
----
-
-## 📋 Evaluation Metrics
-
-| Metric | Target |
-|---|---|
-| mIoU (drivable class) | > 0.72 |
-| mIoU (overall binary) | > 0.75 |
-| Inference FPS (GPU) | > 100 |
-| Inference FPS (CPU) | > 30 |
-| Model parameters | < 3M |
-| Training epochs | 50+ |
-
----
-
-## 🔧 Dataset
-
-**nuScenes v1.0-mini** — 10 scenes, 404 CAM_FRONT keyframes at 1600×900 resolution from Singapore and Boston.
-
-| Property | Value |
-|---|---|
-| Scenes | 10 (7 day + 3 night) |
-| Keyframes | 404 |
-| Resolution | 1600 × 900 → 448 × 256 |
-| Locations | Singapore, Boston |
-
----
-
-## 📈 TensorBoard
+### 5) TensorBoard
 
 ```bash
 tensorboard --logdir runs
 ```
 
-Tracks: training/validation loss, mIoU, learning rate, FPS.
+## Example Outputs / Results
 
----
+Below are example metrics pulled from repo artifacts (TTA + boundary refinement enabled):
 
-## 🛠️ Tech Stack
+### Example A (from `visualizations/metrics.json`)
 
-- **PyTorch** — Model, training, inference
-- **Albumentations** — Image augmentations
-- **OpenCV** — Image processing, morphological operations
-- **ONNX / ONNX Runtime** — Model export and optimized inference
-- **TensorBoard** — Training visualization
-- **nuScenes devkit** — Dataset utilities
+| Metric | Value |
+|---|---:|
+| mIoU overall | 0.8841 |
+| mIoU drivable | 0.8911 |
+| FPS | 145.8 |
+| Params | 1,863,537 |
 
----
+### Example B (from `eval_distilled/metrics.json`)
 
-*Built with ❤️ for MAHE Hackathon*
+| Metric | Value |
+|---|---:|
+| mIoU overall | 0.8037 |
+| mIoU drivable | 0.8228 |
+| FPS | 32.7 |
+| Params | 1,866,793 |
+
+### Example C (from `eval_output/metrics.json`)
+
+| Metric | Value |
+|---|---:|
+| mIoU overall | 0.8789 |
+| mIoU drivable | 0.8521 |
+| FPS | 54.8 |
+| Params | 1,967,179 |
+
+### Sample Visual Outputs
+
+- `visualizations/eval_sample_00.png`
+- `visualizations/eval_sample_01.png`
+- `eval_distilled/visualizations/eval_sample_00.png`
+- `eval_output/visualizations/eval_sample_00.png`
+
+You can generate fresh outputs using `evaluate.py` and `inference.py` as shown above.
